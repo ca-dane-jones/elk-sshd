@@ -1,0 +1,640 @@
+####################################################################################################
+# Logstash Pipeline for SSHD syslog events
+#   version: 1.0.36
+#   date: 2023-04-27
+#
+# TODO: 
+#   - General cleanup
+#   - Move patterns containing client.ip to capture in client.address instead and
+#     add logic to copy client.address into either client.ip or client.domain depending
+#     on value type
+#   - Add feature for reverse DNS lookups of client IP addresses
+####################################################################################################
+input {
+    file {
+        path => ""
+        start_position => "beginning"
+    }
+}
+
+# Filter section
+filter {
+    
+    # Configuration Parameters
+    mutate {
+        
+        # The drop_debug_events setting will only drop debug events that aren't grok'ed separately
+        # in the list of patterns.  See the # Message parsing section.  
+        add_field => {
+            "[_tmp][config][drop_debug_events]" => "true" }
+        add_field => {
+            "[_tmp][config][resolve_destination_address]" => "true" }
+        add_field => {
+            "[_tmp][config][resolve_destination_address]" => "true" }
+        add_field => {
+            "[event][timezone]" => "America/Chicago" }
+        id => "add-filter-config-params"
+    }
+
+    # Put current timestamp into a temporary field for use later
+    ruby { 
+        code => "event.set('_tmpfilterstart', Time.now());" 
+        id => "set-start-timestamp"
+    }
+
+    # Extract syslog header and message parts from full log string
+    grok {
+        patterns_dir => ["./patterns"]
+        match => { "message" => "%{SSHD_SYSLOG_HEAD} %{GREEDYDATA:[_tmp][message]}" }
+        tag_on_failure => ["grok-syslog-failed"]
+        id => "grok-syslog-and-message"
+    }
+
+    # If the syslog grok above failed, drop the message
+    if "grok-syslog-failed" in [tags] {
+        drop { 
+            id => "dropevent-missing-syslog-header"
+        }
+    }
+
+    # Convert syslog date and assign it as the event's @timestamp
+    date {
+        locale => "en"
+        timezone => "%{[event][timezone]}"
+        match => [ "[_tmptimestamp]",
+            "MMM dd HH:mm:ss",
+            "MMM  d HH:mm:ss",
+            "MMM d  HH:mm:ss" ]
+        target => "@timestamp"
+        tag_on_failure => ["date-parse-failure" ]
+        id => "parse-syslog-date"
+    }
+
+    mutate {
+        replace => { "[message]" => "%{[_tmp][message]}" }
+        tag_on_failure => ["mutate-replacemessage-failed"]
+        id => "remove-syslog-header-from-message"
+    }
+
+    # Messege parsing -- depends on the presense of grok patterns defined in sshd.txt located in the ./patterns directory
+    grok {
+        patterns_dir => ["./patterns"]
+        match => { 
+            "message" => [
+                "%{SSHD_INIT}",
+                "%{SSHD_AUTH}",
+                "%{SSHD_AUTH_FAILURE}",
+                "%{SSHD_SESSION}",
+                "%{SSHD_FILE_ACCESS}",
+                "%{SSHD_PAM}",
+                "%{SSHD_PREAUTH}",
+                "%{SSHD_ERROR}",
+                "%{SSHD_DEBUG_MSG}",
+                "%{SSHD_OTHER}",
+                "%{SSHD_SOFTNAS}"
+            ]
+        }
+        tag_on_failure => ["grok-message-failed"]
+        id => "grok-message-content"
+    }
+    
+    # If drop_debug_events is true and the current event is a debug event, 
+    # discard it
+    if ([_tmp][isdebug] or [_tmp][isdebug] =~ /.*/) and [_tmp][config][drop_debug_events] == "true" {
+        drop { 
+            id => "dropevent-message-is-debug"
+        }
+    }
+
+    # Add event base fields
+    mutate {
+        add_field => { 
+            "[ecs][version]" => "8.6.0" }
+        add_field => {
+            "[event][created]" => "%{[_tmpfilterstart]}" }
+        add_field => { 
+            "[event][kind]" => "event" }
+        add_field => { 
+            "[event][category]" => "session" }
+        add_field => {
+            "[event][type]" => "info" }
+        tag_on_failure => ["mutate-basefields-failed"]
+        id => "add-base-ecs-fields"
+    }
+
+    mutate {
+        copy => { "[process][name]" => "[event][provider]" }
+        tag_on_failure => ["copy-eventprovider-failed" ]
+        id => "copy-process-name-to-event-provider"
+    }
+
+    mutate {
+        copy => { "[process][name]" => "[log][syslog][appname]" }
+        tag_on_failure => ["copy-logsyslogappname-failed" ]
+        id => "copy-process-name-to-syslog-appname"
+    }
+
+    mutate {
+        copy => { "[process][pid]" => "[log][syslog][procid]" }
+        tag_on_failure => ["copy-logsyslogprocid-failed" ]
+        id => "copy-process-pid-to-syslog-procid"
+    }
+
+    # Copy the syslog hostname to the destination address
+    mutate {
+        copy => { "[log][syslog][hostname]" => "[destination][address]" }
+        tag_on_failure => ["copy-sysloghostname-to-destinationaddr-failed" ]
+        id => "copy-sysloghostname-to-destination-address"
+    }
+
+    # Copy the syslog hostname to the destination domain
+    mutate {
+        copy => { "[log][syslog][hostname]" => "[destination][domain]" }
+        tag_on_failure => ["copy-sysloghostname-to-destinationaddr-domain" ]
+        id => "copy-sysloghostname-to-destination-domain"
+    }
+
+    # Split multiple sshd ciphers into an array if necessary
+    if [sshd][cipher][name] and [sshd][cipher][name] =~ /.*/ {
+        
+        # First determine if we're dealing with a list
+        grok {
+            match => { "[sshd][cipher][name]" => [ "(?<[_tmp][iscipherlist]>.+,.+)" ] }
+            tag_on_failure => [""]
+            id => "grok-iscipherlist"
+        }
+        
+        # If it's a list, split it into an array.
+        if [_tmp][iscipherlist] and [_tmp][iscipherlist] =~ /.*/ {
+            mutate {
+                split => { "[sshd][cipher][name]" => "," }
+                id => "split-sshd-ciphers"
+            }
+        }
+    }
+
+    # Resolve IP addresses of syslog hostnames to populate destination ip
+    # if configured to do so.  Please note that event processing speed will be
+    # negatively impacted by enabling this functionality.
+    if [_tmp][config][resolve_destination_address] == "true" { 
+        
+        # Copy syslog hostname to destination ip
+        mutate {
+            copy => { "[log][syslog][hostname]" => "[destination][ip]" }
+            tag_on_failure => ["copy-destinationip-failed" ]
+            id => "copy-sysloghostname-to-destinationip"
+        }
+
+        # Perform  DNS lookup and replace destination ip with the query result.
+        # Cache sizes, TTLs, and max retries should be adjusted to meet your needs.
+        dns {
+            resolve => [ "[destination][ip]" ]
+            action => "replace"
+            hit_cache_size => 500
+            hit_cache_ttl => 60
+            failed_cache_size => 500
+            failed_cache_ttl => 5
+            max_retries => 0
+            id => "dnslookup-sysloghostname"
+        }
+
+        # Verify that we recieved a valid IP address response from the DNS
+        # filter.
+        grok {
+            match => { "[destination][ip]" => "%{IP:[_tmp][destinationip]" }
+            tag_on_failure => ["grok-resolvedestinationip-failed"]
+            id => "verify-dnslookup-sysloghostname"
+        }
+
+        # If we didn't recieve a valid response, remove the destination.ip field
+        # to avoid component template field type issues in ES
+        if "grok-resolvedestinationip-failed" in [tags] {
+            mutate {
+                remove_field => [ "[destination][ip]" ]
+                id => "remove-invalid-dnslookup-ip"
+            }
+        }
+    }
+
+    mutate {
+        add_field => { "_tmptraceid" => "%{[log][syslog][hostname]}:%{[process][pid]}" }
+        tag_on_failure => ["mutate-_tmptraceid-failed"]
+        id => "create-temp-traceid"
+    }
+
+    # Process client geo IP information
+    if [client][ip] or [client][ip] =~ /.*/ {
+        
+        # Get city based GeoIP details
+        geoip {
+            default_database_type => "City"
+            source => "[client][ip]"
+            target => "[client]"
+     		tag_on_failure => ["geoip-city-failed"]
+            id => "add-client-geoip-city"
+        }
+        
+        # Get ASN details such as organization name
+        geoip {
+            default_database_type => "ASN"
+            source => "[client][ip]"
+            target => "[client]"
+     		tag_on_failure => ["geoip-asn-failed"]       
+            id => "add-client-geoip-asn"
+        }
+
+        # Rename the ASN organization_name field for proper mapping to ECS
+        mutate {
+            rename => { "[client][as][organization_name]" => "[client][as][organization][name]" }
+            id => "rename-client-asn-orgname-field"
+        }
+        
+        # Copy client object fields and values to the source object.  This is useful for
+        # many ES built-in dashboards, machine learning jobs, etc.
+        mutate {
+            copy => { "[client]" => "[source]" }
+            id => "copy-client-to-source"
+        }
+    }
+
+    # Split group name string into an array
+    if [user][group][name] or [user][group][name] =~ /.*/ {
+        mutate {
+            split => { "[user][group][name]" => "," }
+            id => "split-groupname-to-array"
+        }
+    }
+    
+    # File events
+    if [_tmpfiletype] or [_tmpfiletype] =~ /.*/ {
+        
+        # Add "file" to the event category and "allowed" to the event type
+        mutate {
+            add_field => { "[event][category]" => "file" }
+            add_field => { "[event][type]" => "allowed" }
+            id => "add-file-ecs-fields"
+        }
+        
+        if [_tmpfileaction] or [_tmpfileaction] =~ /.*/ {
+            # Drop file access action to lowercase for string comparisons
+            mutate {
+                lowercase => [ "[_tmpfileaction]" ]
+                id => "lowercase-fileaction-value"
+            }
+            
+            # Split the access action string into an array
+            mutate {
+                # Convert file action to array for multimode access types (e.g. write,create)
+                split => { "[_tmpfileaction]" => "," }
+                id => "split-fileactions-to-array"
+            }
+        }
+
+        # Handle rename event (file renamed)
+        if [_tmpfiletype] == "posix-rename" or [_tmpfiletype] == "rename" {
+            mutate {
+                add_field => { "[event][type]" => "change" }
+                add_field => { "[event][action]" => "file-rename" }
+                add_field => { "[event][outcome]" => "success" }
+                id => "add-file-rename-value"
+            }
+        } 
+
+        # Handle close event (file read)
+        else if [_tmpfiletype] == "close" and "read" in [_tmpfileaction] {
+            mutate {
+                add_field => { "[event][type]" => "access" }
+                add_field => { "[event][action]" => "file-read" }
+                add_field => { "[event][outcome]" => "success" }
+                id => "add-file-close-value"
+            }
+        }
+
+        # Handle close event (file write)
+        else if [_tmpfiletype] == "close" and "written" in [_tmpfileaction] {
+            mutate {
+                add_field => { "[event][type]" => "change" }
+                add_field => { "[event][action]" => "file-write" }
+                add_field => { "[event][outcome]" => "success" }
+                id => "add-file-write-value"
+            }
+        }
+
+        # Handle mkdir event (directory create)
+        else if [_tmpfiletype] == "mkdir" {
+            mutate {
+                add_field => { "[event][type]" => "creation" }
+                add_field => { "[event][action]" => "directory-create" }
+                add_field => { "[event][outcome]" => "success" }
+                id => "add-directory-create-value"
+            }
+        }
+
+        # Handle open event (file opened for read)
+        else if [_tmpfiletype] == "open" and "read" in [_tmpfileaction]  {
+            mutate {
+                add_field => { "[event][type]" => "access" }
+                add_field => { "[event][action]" => "file-read" }
+                add_field => { "[event][outcome]" => "unknown" }
+                id => "add-file-open-read-value"
+            }
+        }
+
+        # Handle open event (file creation)
+        else if [_tmpfiletype] == "open" and "create" in [_tmpfileaction]  {
+            mutate {
+                add_field => { "[event][type]" => "creation" }
+                add_field => { "[event][action]" => "file-create" }
+                add_field => { "[event][outcome]" => "unknown" }
+                copy => { "[_tmpfileaction]" => "[event][reason]" }
+                id => "add-file-open-create-value"
+            }
+        }
+
+        # Handle open event (write only)
+        else if [_tmpfiletype] == "open" and "write" in [_tmpfileaction] and "create" not in [_tmpfileaction]  {
+            mutate {
+                add_field => { "[event][type]" => "change" }
+                add_field => { "[event][action]" => "file-write" }
+                add_field => { "[event][outcome]" => "unknown" }
+                copy => { "[_tmpfileaction]" => "[event][reason]" }
+                id => "add-file-open-write-value"
+            }
+        }
+
+        # Handle open directory event
+        else if [_tmpfiletype] == "opendir" {
+            mutate {
+                add_field => { "[event][type]" => "access" }
+                add_field => { "[event][action]" => "directory-open" }
+                add_field => { "[event][outcome]" => "success" }
+                id => "add-directory-open-value"
+            }
+        }
+
+        # Handle close directory event
+        else if [_tmpfiletype] == "closedir" {
+            mutate {
+                add_field => { "[event][type]" => "access" }
+                add_field => { "[event][action]" => "directory-closed" }
+                add_field => { "[event][outcome]" => "success" }
+                id => "add-directory-close-value"
+            }
+        }
+
+        # Handle file/directory set event
+        else if [_tmpfiletype] == "set" {
+            mutate {
+                add_field => { "[event][type]" => "change" }
+                add_field => { "[event][action]" => "file-set" }
+                add_field => { "[event][outcome]" => "success" }
+                id => "add-directory-removed-value"
+            }
+        }
+
+        # Handle file removed event
+        else if [_tmpfiletype] == "remove" {
+            mutate {
+                add_field => { "[event][type]" => "deletion" }
+                add_field => { "[event][action]" => "file-delete" }
+                add_field => { "[event][outcome]" => "success" }
+                id => "add-file-removed-value"
+            }
+        }
+    }
+    
+    # Authentication Events
+    if [sshd][authentication][result] or [sshd][authentication][result] =~ /.*/ {
+        
+        # Drop authentication result to lowercase for string sensitve processing
+        mutate {
+            lowercase => [ "[sshd][authentication][result]" ]
+            id => "lowercase-authentication-result"
+        }    
+    
+        # Add authentication tags to the event.category object
+        mutate {
+            add_field => { "[event][category]" => "authentication" }
+            id => "add-authentication-ecs-fields"
+        }
+
+        # Successful authentication - Record the authentication method and add session start to event info
+        if [sshd][authentication][result] == "accepted" {
+            mutate {
+                add_field => { "[event][type]" => "allowed" }
+                add_field => { "[event][outcome]" => "success" }
+                add_field => { "[event][reason]" => "valid-%{[sshd][authentication][method]}" }
+                id => "add-authentication-success-values"
+            }
+        }
+
+        # Failed authentication (Invalid user) - Record the authentication method and add session denied to event info 
+        else if [sshd][authentication][result] == "failed" and [_tmp][invuser] == "invalid user" {
+            mutate {
+                add_field => { "[event][type]" => "denied" }
+                add_field => { "[event][outcome]" => "failure" }
+                add_field => { "[event][reason]" => "invalid-user" }
+                id => "add-authentication-invaliduser-values"
+            }
+        }
+
+        # Failed authentication (password, publikey, etc) - Record the authentication method and add session denied to event info
+        else if [sshd][authentication][result] == "failed" {
+            mutate {
+                add_field => { "[event][type]" => "denied" }
+                add_field => { "[event][outcome]" => "failure" }
+                add_field => { "[event][reason]" => "invalid-%{[sshd][authentication][method]}" }
+                id => "add-authentication-failed-values"
+            }
+        }       
+    }
+
+    # Set this event's transaction ID. 
+    if [user][name] or [user][name] =~ /.*/ {
+       
+         # The memcached plugin doesn't handle objects well so flaten user.name to a regular field....
+        mutate {
+            copy => { "[user][name]" => "_tmpusername" }
+            id => "copy-username-to-tmp-field"
+        }       
+        
+        # Add key value pair to memcached
+        memcached {
+            hosts => ["localhost"]
+            namespace => "sshd"
+            tag_on_failure => "memcached-settraceid-failed"
+            ttl => 30
+            set => {
+                "[_tmpusername]" => "%{_tmptraceid}"
+            }
+            id => "memcached-set-traceid"
+        }
+        
+        # Create trace ID and update _tmptraceid because we'll need it later
+        mutate {
+            add_field => { "[trace][id]" => "%{_tmptraceid}:%{[user][name]}" }
+        }
+
+        # Replace the value in _tmptraceid
+        mutate {
+            replace => { "_tmptraceid" => "%{[trace][id]}" }
+        }
+
+    } else {
+        
+        # Perform lookup for user.name against memcached
+        memcached {
+            hosts => ["localhost"]
+            namespace => "sshd"
+            tag_on_failure => "memcached-gettraceid-failed"
+            get => {
+                "%{_tmptraceid}" => "[_tmpmemcachedresult]"
+            }
+        }
+        
+        # If memcached returned a result, add the result to the temporary trace ID and create the trace ID nested field
+        # Also add the user name to the event
+        if [_tmpmemcachedresult] or [_tmpmemcachedresult] =~ /.*/ {
+            
+            mutate {
+                add_field => { "[trace][id]" => "%{_tmptraceid}:%{[_tmpmemcachedresult]}" }
+                add_field => { "[user][name]" => "%{[_tmpmemcachedresult]}" }
+            }
+
+            mutate {
+                replace => { "_tmptraceid" => "%{[trace][id]}" }
+            }
+        
+        } else {
+
+            # Otherwise, just build the trace ID nested field from the temporary flat field
+            mutate {
+                copy => { "_tmptraceid" => "[trace][id]" }
+            }
+        }
+    }
+
+    # Session start events
+    if [_tmp][session_start] or [_tmp][session_start] =~ /.*/ {
+
+        # Make sure event category contains "session"
+        if "session" not in [event][category] {
+            mutate {
+                add_field => { "[event][category]" => "session" }
+            }
+        }
+
+        # Add start to event type
+        mutate {
+            add_field => { "[event][type]" => "start" }
+        }
+
+        # Add transaction ID and sesion start time to Memcached so that we can generate
+        # session elapsed time when we see a session end event
+        memcached {
+            hosts => ["localhost"]
+            namespace => "sshd-event"
+            tag_on_failure => "memcached-seteventstart-failed"
+            ttl => 1440
+            set => {
+                "[_tmptimestamp]" => "%{_tmptraceid}"
+            }
+        }
+    }
+
+    # Session end events
+    if [_tmp][session_end] or [_tmp][session_end] =~ /.*/ {
+    
+        # Make sure event category contains "session"
+        if "session" not in [event][category] {
+            mutate {
+                add_field => { "[event][category]" => "session" }
+            }
+        }
+
+        # Add end to event type
+        mutate {
+            add_field => { "[event][type]" => "end" }
+        }
+
+        # Retrieve event start time from memcached
+        memcached {
+            hosts => ["localhost"]
+            namespace => "sshd-event"
+            tag_on_failure => "memcached-geteventstart-failed"
+            get => {
+                "%{_tmptraceid}" => "[_tmpmemcachedeventstart]"
+            }
+        }
+        
+        # Calculate event duration
+        if [_tmpmemcachedeventstart] or [_tmpmemcachedeventstart] =~ /.*/ {
+            
+            # Calculate event duration
+            ruby {
+                code => "duration = 
+                    (DateTime.parse(event.get('_tmptimestamp')).to_time.to_f*1000 - DateTime.parse(event.get('_tmpmemcachedeventstart')).to_time.to_f*1000) rescue nil; 
+                    event.set('_tmpeventduration', duration); "
+            }
+
+            # If we were able to calculate the event duration, add the result to the event object
+            if [_tmpeventduration] or [_tmpeventduration] =~ /.*/ {
+                mutate {
+                    add_field => { "[event][duration]" => "%{_tmpeventduration}" }
+                }
+            }
+        }
+    }
+
+    # Error events
+    if [error][message] or [error][message] =~ /.*/ {
+        
+        # Make sure event category contains "error"
+        if "error" not in [event][type] {
+            mutate {
+                add_field => { "[event][type]" => "error" }
+                id => "add-error-to-event-type"
+            }
+        }
+
+        # If there's an extended error message, append it to error message
+        if [_tmp][error_msg_ext] or [_tmp][error_msg_ext] =~ /.*/ {
+            mutate {
+                replace => { "[error][message]" => "%{[error][message]} - %{[_tmp][error_msg_extended]}" }
+                id => "append-error_msg_ext-to-error_message"
+            }
+        }
+    }
+
+    # Remove temporary fields
+    mutate {
+        remove_field => [
+            "_tmp",
+            "_tmpeventduration",
+            "_tmpfileaction",
+            "_tmpfiletype",
+            "_tmpfilterstart",
+            "_tmptimestamp",
+            "_tmpmemcachedresult", 
+            "_tmpmemcachedeventstart",
+            "_tmptraceid",
+            "_tmpusername" 
+        ]
+        id => "remove-temp-fields"
+    }
+}
+
+output {
+    stdout { }
+    elasticsearch{
+        action => "create"
+        data_stream => "true"
+        data_stream_type => "logs"
+        data_stream_dataset => "sshd"
+        data_stream_namespace => "default"
+        hosts => [""]
+        user => ""
+        password => ""
+        ca_trusted_fingerprint => ""
+    }
+}

@@ -1,0 +1,155 @@
+###############################################################################
+# sshd grok patterns for ECS
+# 	ECS Compatability: 8.6.0+
+# 	version: 1.0.36
+# 	date: 2023-04-27
+#
+#   TO-DO:
+#      - Migrate privesep lines to new privsep grok pattern
+#      - Move PAM messages to proper section
+#      - Consolidate error and fatal messages that don't have interesting 
+#        fields into generic captures
+################################################################################
+
+# Start/Stop %{SSHD_INIT}
+SSHD_INIT               (?:%{SSHD_SVC_LISTEN}|%{SSHD_SVC_TERMINATE})
+SSHD_SVC_LISTEN        	Server listening on %{IP:[sshd][listen][ip]} port %{POSINT:[sshd][listen][port]}.
+SSHD_SVC_TERMINATE      Received signal %{NUMBER:[sshd][signal]}; terminating.
+
+# Other Authentication messages %{SSHD_AUTH}
+SSHD_AUTH               (?:%{SSHD_SESSION_ACCEPT}|%{SSHD_AUTH_REQUEST}|%{SSHD_AUTH_STAT}|%{SSHD_USER_GROUPS}|%{SSHD_AUTH_POSTPONED}|%{SSHD_KEY_MATCH}|%{SSHD_AUTH_RQRMT}|%{SSHD_AUTH_PAM_FAIL}|%{SSHD_INV_USER}|%{SSHD_AUTH_USER_UNK}|%{SSHD_AUTH_UNAUTHORIZED}|%{SSHD_AUTH_SSSD_FAIL}|%{SSHD_PAM_AUTH_FAIL_CNT}|%{SSHD_PAM_IGN_MAX_RETRY})
+SSHD_SESSION_ACCEPT     (?<[sshd][authentication][result]>Accepted) %{WORD:[sshd][authentication][method]} for %{USERNAME:[user][name]} from %{IP:[client][ip]} port %{POSINT:[client][port]} %{WORD:[sshd][protocol]}(?:\: %{GREEDYDATA:[sshd][cipher][name]}|)
+SSHD_AUTH_REQUEST       debug1: (?<[sshd][authentication][request]>userauth-request) for user %{USERNAME:[user][name]} service (?<[service][name]>[\w\d-]+) method %{WORD:[sshd][authentication][method]}(?:%{GREEDYDATA}|})
+SSHD_AUTH_STAT          debug1: attempt %{NUMBER:[sshd][authentication][attempt]} failures %{NUMBER:[sshd][authentication][failures]}%{GREEDYDATA}
+SSHD_USER_GROUPS        debug1: user %{USERNAME:[user][name]} matched group list (?<[user][group][name]>[\w,\d]+)%{GREEDYDATA}
+SSHD_AUTH_POSTPONED     Postponed %{WORD} for %{USERNAME:[user][name]} from %{IP:[client][ip]} port %{POSINT:[client][port]} %{WORD:[sshd][protocol]}(?: \[%{GREEDYDATA:[sshd][privsep]}\]|)
+SSHD_KEY_MATCH          Found matching %{DATA:[sshd][key][algorithm]} key: %{GREEDYDATA:[sshd][key][fingerprint]}
+SSHD_AUTH_RQRMT         pam_succeed_if\(sshd:auth\): requirement \"%{GREEDYDATA:[sshd][authentication][requirement]}\" not met by user \"%{GREEDYDATA:[user][name]}\"
+SSHD_AUTH_PAM_FAIL		pam_(?:unix|sss)\(sshd:auth\): authentication (?:failure|success); logname=%{GREEDYDATA} uid=%{NUMBER:[user][id]} euid=%{NUMBER} tty=%{WORD:[sshd][tty]} ruser=%{GREEDYDATA} rhost=%{IP:[client][ip]}(?:\s+user=%{USERNAME:[user][name]}|)
+SSHD_INV_USER           Invalid user %{GREEDYDATA:[user][name]} from %{IP:[client][ip]}(?: port %{POSINT:[client][port]}|)
+SSHD_AUTH_USER_UNK      pam_unix\(sshd:auth\): check pass; user unknown
+SSHD_AUTH_UNAUTHORIZED  Authentication tried for %{USERNAME:[user][name]} with correct key but not from a permitted host \(host=%{HOSTNAME:[client][domain]}, ip=%{IP:[client][ip]}\).
+SSHD_AUTH_SSSD_FAIL     pam_sss\(sshd:auth\): received for user %{USERNAME:[user][name]}: %{NUMBER} \(%{GREEDYDATA:[event][reason]}\)
+SSHD_PAM_AUTH_FAIL_CNT  PAM %{NUMBER} more authentication failure(?:s|); logname=%{GREEDYDATA} uid=%{NUMBER:[user][id]} euid=%{NUMBER} tty=%{WORD:[sshd][tty]} ruser=%{GREEDYDATA} rhost=%{IP:[client][ip]}(?:\s*user=%{USERNAME:[user][name]}|)
+SSHD_PAM_IGN_MAX_RETRY  PAM service\(sshd\) ignoring max retries; %{NUMBER} > %{NUMBER}
+
+# Authentication failure messages %{SSHD_AUTH_FAILURE}
+SSHD_AUTH_FAILURE       (?:%{SSHD_AUTH_FAIL}|%{SSHD_AUTH_INVALID_USER})
+SSHD_AUTH_FAIL          (?<[sshd][authentication][result]>Failed) %{WORD:[sshd][authentication][method]} for %{USERNAME:[user][name]} from %{IP:[client][ip]} port %{NUMBER:[client][port]} %{WORD:[sshd][protocol]}
+SSHD_AUTH_INVALID_USER  (?<[sshd][authentication][result]>Failed) %{WORD:[sshd][authentication][method]} for (?<[_tmp][invuser]>invalid user) %{USERNAME:[user][name]} from %{IP:[client][ip]} port %{NUMBER:[client][port]} %{WORD:[sshd][protocol]}
+
+# General Session and connection messages %{SSHD_SESSION}
+SSHD_SESSION            (?:%{SSHD_SFTP_SESS_OPEN}|%{SSHD_SFTP_SESS_OPEN2}|%{SSHD_SFTP_SESS_OPEN3}|%{SSHD_SSH_SESS_OPEN}|%{SSHD_SESSION_ACTION}|%{SSHD_SESSION_CLOSED2}|%{SSHD_CONN_CLOSING}|%{SSHD_CONN_CLOSED}|%{SSHD_SESSION_XFER_BYTES}|%{SSHD_SESSION_PAM_OPEN}|%{SSHD_SESSION_PAM_CLOSE}|%{SSHD_CONN_OPEN}|%{SSHD_USER_CHILD_PID}|%{SSHD_CHGD_ROOT_DIR}|%{SSHD_OOM_SCORE_ADJ}|%{SSHD_SUBSYS_RQST})
+SSHD_SESSION_ACTION	    session %{WORD:[sshd][session][action]} for local user %{USERNAME:[user][name]} from \[%{IP:[client][ip]}](?: \[%{GREEDYDATA:[sshd][privsep]}\]|)
+SSHD_SESSION_CLOSED2    Close session: user %{USERNAME:[user][name]} from %{IP:[client][ip]} port %{POSINT:[client][port]}%{GREEDYDATA} id %{NUMBER:[sshd][channel]}%{GREEDYDATA}
+SSHD_SESSION_XFER_BYTES Transferred: sent %{NUMBER:[sshd][sentbytes]}, received %{NUMBER:[sshd][rcvdbytes]} bytes(?: \[%{GREEDYDATA:[sshd][privsep]}\]|)
+SSHD_SESSION_PAM_OPEN   pam_unix\(sshd:session\): (?<[_tmp][session_start]>session opened) for user %{USERNAME:[user][name]} by \(uid=\d+\)
+SSHD_SESSION_PAM_CLOSE  pam_unix\(sshd:session\): (?<[_tmp][session_end]>session closed) for user %{USERNAME:[user][name]}
+SSHD_CONN_CLOSING       Closing connection to %{IP:[client][ip]} port %{POSINT:[client][port]}%{GREEDYDATA}
+SSHD_CONN_CLOSED        Connection closed by %{IP:[client][ip]}(?: port %{POSINT:[client][port]}%{GREEDYDATA}|)
+SSHD_CONN_OPEN		    Connection from %{IP:[client][ip]} port %{POSINT:[client][port]}(?: on %{IP:[destination][ip]} port %{POSINT:[destination][port]}|)
+SSHD_SFTP_SESS_OPEN	    Starting session: forced-command \(%{WORD}\) '%{GREEDYDATA:[sshd][sftp][startcommand]}' for %{USERNAME:[user][name]} from %{IP:[client][ip]} port %{POSINT:[client][port]} id %{NUMBER} \[%{WORD:[sshd][privsep]}\]
+SSHD_SFTP_SESS_OPEN2    Starting session: command for %{USERNAME:[user][name]} from %{IP:[client][ip]} port %{POSINT:[client][port]} id %{NUMBER}(?: %{SSHD_PRIVSEP}|)
+SSHD_SFTP_SESS_OPEN3    Starting session: subsystem '%{WORD:[sshd][subsystem]}' for %{USERNAME:[user][name]} from %{IP:[client][ip]} port %{POSINT:[client][port]} id %{NUMBER}(?: %{SSHD_PRIVSEP}|)
+SSHD_SSH_SESS_OPEN      Starting session: %{WORD:[sshd][subsystem]} on (?<[sshd][terminalid]>pts/%{NUMBER}|:%{NUMBER}) for %{USERNAME:[user][name]} from %{IP:[client][ip]} port %{POSINT:[client][port]} id %{NUMBER}
+SSHD_USER_CHILD_PID     User child is on pid %{POSINT:[process][cpid]}
+SSHD_CHGD_ROOT_DIR      Changed root directory to %{QUOTEDSTRING:[file][path]}(?: \[%{GREEDYDATA:[sshd][privsep]}\]|)
+SSHD_OOM_SCORE_ADJ      Set %{DATA:[file][path]} to %{NUMBER:[sshd][oom_score]}
+SSHD_SUBSYS_RQST        subsystem request for %{WORD:[sshd][subsystem]}
+
+# File access %{SSHD_FILE}
+SSHD_FILE_ACCESS        (?:%{SSHD_FILE_ACCESS_RN}|%{SSHD_FILE_ACCESS_CLRD}|%{SSHD_FILE_ACCESS_CLWR}|%{SSHD_FILE_ACCESS_MDIR}|%{SSHD_FILE_ACCESS_OPEN}|%{SSHD_FILE_ACCESS_OPDR}|%{SSHD_FILE_ACCESS_CLDR}|%{SSHD_FILE_ACCESS_SET}|%{SSHD_FILE_ACCESS_RM}|%{SSHD_FILE_ACCESS_MSG})(?: \[%{WORD:[sshd][privsep]}\]|)
+SSHD_FILE_ACCESS_RN     (?:(?<_tmpfiletype>posix-rename)|(?<_tmpfiletype>rename)) old %{QUOTEDSTRING:[file][original_path]} new %{QUOTEDSTRING:[file][path]}
+SSHD_FILE_ACCESS_CLRD   (?<_tmpfiletype>close) %{QUOTEDSTRING:[file][path]} bytes (?<_tmpfileaction>read) %{NUMBER:[file][readbytes]} written 0
+SSHD_FILE_ACCESS_CLWR   (?<_tmpfiletype>close) %{QUOTEDSTRING:[file][path]} bytes read 0 (?<_tmpfileaction>written) %{POSINT:[file][writebytes]}
+SSHD_FILE_ACCESS_MDIR   (?<_tmpfiletype>mkdir) name %{QUOTEDSTRING:[file][path]} mode %{NUMBER:[file][mode]}
+SSHD_FILE_ACCESS_OPEN   (?<_tmpfiletype>open) %{QUOTEDSTRING:[file][path]} flags (?<_tmpfileaction>[\w,]+) mode %{NUMBER:[file][mode]}
+SSHD_FILE_ACCESS_OPDR   (?<_tmpfiletype>opendir) %{QUOTEDSTRING:[file][path]}
+SSHD_FILE_ACCESS_CLDR   (?<_tmpfiletype>closedir) %{QUOTEDSTRING:[file][path]}
+SSHD_FILE_ACCESS_SET    (?<_tmpfiletype>set) %{QUOTEDSTRING:[file][path]} %{WORD:_tmpfileaction} %{NOTSPACE}
+SSHD_FILE_ACCESS_RM     (?<_tmpfiletype>remove) name %{QUOTEDSTRING:[file][path]}
+SSHD_FILE_ACCESS_MSG    sent status %{GREEDYDATA:[file][access][message]}
+
+# Other PAM messages %{SSHD_PAM}
+SSHD_PAM                (?:%{SSHD_PAM_INIT}|%{SSHD_PAM_CLIENT}|%{SSHD_PAM_TTY}|%{SSHD_PAM_PWD_EXPIRY}|%{SSHD_PAM_PERM_DENIED}|%{SSHD_PAM_PERM_DENIED2})
+SSHD_PAM_INIT           debug1: PAM: initializing for "%{USERNAME:[user][name]}"
+SSHD_PAM_CLIENT         debug1: PAM: setting PAM_RHOST to "%{IP:[client][ip]}"
+SSHD_PAM_TTY            debug1: PAM: setting PAM_TTY to "%{WORD:[sshd][tty]}"
+SSHD_PAM_PWD_EXPIRY     pam_sss\(sshd:auth\): User info message: Your password will expire in %{NUMBER} day\(s\).
+SSHD_PAM_PERM_DENIED    pam_sss\(sshd:account\): Access denied for user %{USERNAME:[user][name]}%{GREEDYDATA}
+SSHD_PAM_PERM_DENIED2   fatal: Access denied for user %{USERNAME:[user][name]} by PAM account configuration %{SSHD_PRIVSEP}
+
+# Privsep %{SSHD_PREAUTH}
+SSHD_PREAUTH            (?:%{SSHD_DISC_PREAUTH}|%{SSHD_RECE_PREAUTH}|%{SSHD_MAXE_PREAUTH}|%{SSHD_DISR_PREAUTH}|%{SSHD_INVA_PREAUTH}|%{SSHD_REST_PREAUTH}|%{SSHD_CLOS_PREAUTH}|%{SSHD_FAIL_PREAUTH}|%{SSHD_FAI2_PREAUTH})
+SSHD_DISC_PREAUTH       Disconnected from (?:user %{USERNAME:[user][name]} |)%{IP:[client][ip]} port %{POSINT:[client][port]}(?: %{SSHD_PRIVSEP}|)
+SSHD_RECE_PREAUTH       Received disconnect from %{IP:[client][ip]}(?: port %{POSINT:[client][port]}|):(?: |)%{NUMBER:[sshd][disconnect][code]}: %{GREEDYDATA:[event][reason]} \[%{GREEDYDATA:[sshd][privsep]}\]
+SSHD_MAXE_PREAUTH       error: maximum authentication attempts exceeded for (?:invalid user |)%{USERNAME:[user][name]} from %{IP:[client][ip]} port %{POSINT:[client][port]} %{WORD:[sshd][protocol]}\s*(?:\[%{GREEDYDATA:[sshd][privsep]}\]|)
+SSHD_DISR_PREAUTH       Disconnecting: %{GREEDYDATA:[sshd][disconnect][status]} %{SSHD_PRIVSEP}
+SSHD_INVA_PREAUTH       input_userauth_request: invalid user %{USERNAME:[user][name]}?\s*(?:\[%{GREEDYDATA:[sshd][privsep]}\]|)
+SSHD_REST_PREAUTH       Connection reset by %{IP:[client][ip]} port %{POSINT:[client][port]}\s*(?:\[%{GREEDYDATA:[sshd][privsep]}\]|)
+SSHD_CLOS_PREAUTH       Connection closed by %{IP:[client][ip]} port %{POSINT:[client][port]}\s*(?:\[%{GREEDYDATA:[sshd][privsep]}\]|)
+SSHD_FAIL_PREAUTH       fatal: (?<[sshd][fatal][status]>Unable to negotiate) with %{IP:[client][ip]} port %{POSINT:[client][port]}:\s*%{GREEDYDATA:[sshd][disconnect][status]}? \[%{GREEDYDATA:[sshd][privsep]}\]
+SSHD_FAI2_PREAUTH       fatal: %{GREEDYDATA:[sshd][fatal][status]}: Connection from %{IP:[client][ip]} port %{POSINT:[client][port]}:\s*%{GREEDYDATA:[sshd][disconnect][status]}? \[%{GREEDYDATA:[sshd][privsep]}\]
+
+# Errors and warnings %{SSHD_ERROR}
+SSHD_ERROR              (?:%{SSHD_IDENT_FAIL}|%{SSHD_MAPB_FAIL}|%{SSHD_RMAP_FAIL}|%{SSHD_TOOMANY_AUTH}|%{SSHD_CORRUPT_MAC}|%{SSHD_PACKET_CORRUPT}|%{SSHD_BAD_VERSION}|%{SSHD_PAM_FAIL}|%{SSHD_PAM_LOGOUT_ERR}|%{SSHD_AUTH_ERR1}|%{SSHD_HOST_KEY_ERR}|%{SSHD_READ_ERR_PRIVSEP}|%{SSHD_READ_ERR}|%{SSHD_BAD_STR_LEN}|%{SSHD_BAD_KEY_TYPE}|%{SSHD_KEY_READ_FAIL}|%{SSHD_TUNN_ERR1}|%{SSHD_TUNN_ERR2}|%{SSHD_TUNN_ERR3}|%{SSHD_TUNN_ERR4}|%{SSHD_TUNN_TIMEOUT}|%{SSHD_REFUSE_CONN}|%{SSHD_TCPWRAP_FAIL1}|%{SSHD_TCPWRAP_FAIL2}|%{SSHD_TCPWRAP_FAIL3}|%{SSHD_TCPWRAP_FAIL4}|%{SSHD_TCPWRAP_FAIL5}|%{SSHD_AUTH_USER_ERR}|%{SSHD_SOCKET_ERR}|%{SSHD_DISP_PROT_ERR}|%{SSHD_UNK_EXT_RQST}|%{SSHD_DEAD_LCK_AVOIDED}|%{SSHD_PAM_SESS_TIMEOUT}|%{SSHD_BAD_PCKT_LEN}|%{SSHD_BUFFER_UNDER}|%{SSHD_BUFFER_FATAL}|%{SSHD_CIPHER_FAIL}|%{SSHD_NO_KEY_ALG}|%{SSHD_KEX_ERR}|%{SSHD_INV_DH_VALUE}|%{SSHD_BUFF_NEG_ERR}|%{SSHD_BUFF_NEG_FTL})
+SSHD_IDENT_FAIL         (?<[error][message]>Did not receive identification string) from %{IP:[client][ip]}(?: port %{POSINT:[client][port]}|)
+SSHD_MAPB_FAIL          Address %{IP:[client][ip]} maps to %{HOSTNAME:[client][domain]}, but this does not map back to the address - POSSIBLE BREAK-IN ATTEMPT!
+SSHD_RMAP_FAIL          reverse mapping checking getaddrinfo for %{HOSTNAME:[client][domain]} \[%{IP:[client][ip]}\] failed - POSSIBLE BREAK-IN ATTEMPT!
+SSHD_TOOMANY_AUTH       (?<[error][message]>Disconnecting: Too many authentication failures)(?: for %{USERNAME:[user][name]}| \[%{GREEDYDATA:[sshd][privsep]}\])
+SSHD_CORRUPT_MAC        (?<[error][message]>Corrupted MAC on input)(?:.|. \[%{GREEDYDATA:[sshd][privsep]}\]|)
+SSHD_PACKET_CORRUPT     (?<[error][message]>Disconnecting: Packet corrupt)
+SSHD_BAD_VERSION        (?<[error][message]>Bad protocol version identification) '%{DATA:[sshd][protocol]}' from %{IP:[client][ip]}(?: port %{POSINT:[client][port]}|)
+SSHD_PAM_FAIL           (?<[error][message]>pam_systemd\(sshd:session\): Failed to release session): %{GREEDYDATA:[sshd][disconnect][fail]}
+SSHD_PAM_LOGOUT_ERR     (?<[error][message]>syslogin_perform_logout: logout\(\) returned an error)
+SSHD_AUTH_ERR1          error: (?<[error][message]>Received disconnect) from %{IP:[client][ip]} port %{POSINT:[client][port]}:%{NUMBER:[sshd][disconnect][code]}: %{GREEDYDATA:[error][type]}: %{GREEDYDATA:[_tmp][error_msg_ext]} \[%{GREEDYDATA:[sshd][privsep]}\]
+SSHD_HOST_KEY_ERR       error: (?<[error][message]>Could not load host key): %{GREEDYDATA:[file][path]}
+SSHD_READ_ERR_PRIVSEP   (?<[error][message]>Read error from remote host) %{IP:[client][ip]}(?: port %{POSINT:[client][port]}|): %{GREEDYDATA:[_tmp][error_msg_ext]} \[%{GREEDYDATA:[sshd][privsep]}\]
+SSHD_READ_ERR           (?<[error][message]>Read error from remote host) %{IP:[client][ip]}(?: port %{POSINT:[client][port]}|): %{GREEDYDATA:[_tmp][error_msg_ext]}
+SSHD_BAD_STR_LEN        error: (?<[error][message]>buffer_get_string_ret: bad string length) %{NUMBER}
+SSHD_BAD_KEY_TYPE       error: (?<[error][message]>key_from_blob: can't read key type)
+SSHD_KEY_READ_FAIL      error: (?<[error][message]>key_read: key_from_blob %{DATA} failed)
+SSHD_TUNN_ERR1          error: (?<[error][message]>connect_to) %{IP:[sshd][listen][ip]} port %{NUMBER:[sshd][listen][port]}: %{GREEDYDATA:[_tmp][error_msg_ext]}.
+SSHD_TUNN_ERR2          error: (?<[error][message]>channel_setup_fwd_listener: cannot listen to port): %{NUMBER:[sshd][listen][port]}
+SSHD_TUNN_ERR3          error: (?<[error][message]>bind: Address already in use)
+SSHD_TUNN_ERR4          error: (?<[error][message]>channel_setup_fwd_listener_tcpip: cannot listen to port): %{NUMBER:[sshd][listen][port]}
+SSHD_TUNN_TIMEOUT       (?<[error][message]>Timeout, client not responding).
+SSHD_REFUSE_CONN        (?<[error][message]>refused connect) from %{DATA:[client][domain]} \(%{IP:[client][ip]}\)
+SSHD_TCPWRAP_FAIL1      warning: %{DATA:[sshd][tcpdfile]}, line %{NUMBER}: can't verify hostname: getaddrinfo\(%{DATA:[client][domain]}, %{DATA:[sshd][safamily]}\) failed
+SSHD_TCPWRAP_FAIL2      warning: %{DATA:[sshd][tcpdfile]}, line %{NUMBER}: host name/address mismatch: %{IP:[client][ip]} != %{HOSTNAME:[client][domain]}
+SSHD_TCPWRAP_FAIL3      warning: %{DATA:[sshd][tcpdfile]}, line %{NUMBER}: host name/name mismatch: %{HOSTNAME:[client][domain]} != %{HOSTNAME:[client][domain2]}
+SSHD_TCPWRAP_FAIL4      warning: %{DATA:[sshd][tcpdfile]}, line %{NUMBER}: host name/name mismatch: reverse lookup results in non-FQDN %{HOSTNAME:[client][domain]}
+SSHD_TCPWRAP_FAIL5      warning: (?<[error][message]>can't get client address: Connection reset by peer)
+SSHD_AUTH_USER_ERR      pam_succeed_if\(sshd:auth\): (?<[error][message]>error retrieving information about user) %{USERNAME:[user][name]}
+SSHD_SOCKET_ERR         fatal: (?<[error][message]>Read from socket failed: %{GREEDYDATA})
+SSHD_DISP_PROT_ERR      (?<[error][message]>dispatch_protocol_error: type %{NUMBER} seq %{NUMBER})(?: %{SSHD_PRIVSEP}|)
+SSHD_UNK_EXT_RQST       error: (?<[error][message]>Unknown extended request %{QUOTEDSTRING}) %{SSHD_PRIVSEP}
+SSHD_DEAD_LCK_AVOIDED   pam_systemd\(sshd:session\): (?<[error][message]>Failed to create session: Resource deadlock avoided)
+SSHD_PAM_SESS_TIMEOUT   pam_systemd\(sshd:session\): (?<[error][message]>Failed to create session: Connection timed out)
+SSHD_BAD_PCKT_LEN       (?<[error][message]>Bad packet length %{NUMBER}).(?: %{SSHD_PRIVSEP}|)
+SSHD_BUFFER_UNDER       error: (?<[error][message]>buffer_get_ret: trying to get more bytes %{NUMBER} than in buffer %{NUMBER})
+SSHD_BUFFER_FATAL       fatal: (?<[error][message]>buffer_get_int: buffer error)
+SSHD_CIPHER_FAIL        (?<[error][message]>Unable to negotiate) with %{IP:[client][ip]} port %{NUMBER:[client][port]}: %{GREEDYDATA:[_tmp][error_msg_ext]}. Their offer: %{GREEDYDATA:[sshd][cipher][name]} %{SSHD_PRIVSEP}
+SSHD_NO_KEY_ALG         fatal: (?<[error][message]>no hostkey alg)
+SSHD_KEX_ERR            error: (?<[error][message]>kex protocol error): type %{NUMBER} seq %{NUMBER} %{SSHD_PRIVSEP}
+SSHD_INV_DH_VALUE       (?<[error][message]>invalid public DH value): %{GREEDYDATA}
+SSHD_BUFF_NEG_ERR       error: (?<[error][message]>buffer_get_bignum2_ret: negative numbers not supported)
+SSHD_BUFF_NEG_FTL       fatal: (?<[error][message]>buffer_get_bignum2: buffer error)
+
+# Debug Messages
+SSHD_DEBUG_MSG          (?<[_tmp][isdebug]>debug[\d]:) %{GREEDYDATA:[sshd][debugmessage]}
+
+# Other patterns %{SSHD_OTHER}
+SSHD_OTHER              (?:%{SSHD_RECE_NOPRIVSEP}|%{SSHD_DISR_NOPRIVSEP})
+SSHD_RECE_NOPRIVSEP     Received disconnect from %{IP:[client][ip]}(?: port %{POSINT:[client][port]}|):(?: |)%{NUMBER:[sshd][disconnect][code]}: %{GREEDYDATA:[event][reason]}
+SSHD_DISR_NOPRIVSEP     Disconnecting: %{GREEDYDATA:[sshd][disconnect][status]}
+
+# SoftNAS patterns %{SSHD_SOFTNAS}
+SSHD_SOFTNAS            (?:%{SSHD_SNAS_VERSION}|%{SSHD_SNAS_KEX}|%{SSHD_SNAS_AUTH})
+SSHD_SNAS_VERSION       SSH: Server;Ltype: %{GREEDYDATA:[sshd][softnas][logtype]};Remote: %{IP:[client][ip]}-%{POSINT:[client][port]};Protocol: %{GREEDYDATA:[sshd][protocol]};Client: %{GREEDYDATA}
+SSHD_SNAS_KEX           SSH: Server;Ltype: %{GREEDYDATA:[sshd][softnas][logtype]};Remote: %{IP:[client][ip]}-%{POSINT:[client][port]};Enc: %{GREEDYDATA:[sshd][cipher][name]}MAC: %{GREEDYDATA:[sshd][cipher][mac]};Comp: %{GREEDYDATA:[sshd][cipher][comp]} %{SSHD_PRIVSEP}
+SSHD_SNAS_AUTH          SSH: Server;Ltype: %{GREEDYDATA:[sshd][softnas][logtype]};Remote: %{IP:[client][ip]}-%{POSINT:[client][port]};Name: %{USERNAME:[user][name]} %{SSHD_PRIVSEP}
+
+# General
+SSHD_SYSLOG_HEAD        %{SYSLOGTIMESTAMP:[_tmptimestamp]} (?<[log][syslog][hostname]>[\w-]+) %{WORD:[process][name]}\[%{POSINT:[process][pid]}]:
+SSHD_PRIVSEP            (?:\[(?<[sshd][privsep]>preauth)\]|\[(?<[sshd][privsep]>postauth)\])
